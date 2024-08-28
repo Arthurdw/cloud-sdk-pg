@@ -1,0 +1,90 @@
+name: Scheduled Build and Push Docker Image
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # Runs every day at midnight
+  workflow_dispatch: # Allows manual triggering of the workflow
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    if: github.actor != 'github-actions[bot]'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Login to DockerHub
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Check for google cloud-sdk updates
+        id: update
+        run: |
+          # Pull the latest image
+          docker pull google/cloud-sdk:alpine
+          # Get the image ID of the latest image
+          latest_image_id=$(docker inspect --format='{{.Id}}' google/cloud-sdk:alpine)
+          echo "Latest Image ID: $latest_image_id"
+
+          # Compare with the current image ID
+          if [ -f image_id.txt ]; then
+            current_image_id=$(cat image_id.txt)
+          else
+            current_image_id=""
+          fi
+
+          echo "Current Image ID: $current_image_id"
+
+          # Save the latest image ID
+          echo $latest_image_id > image_id.txt
+
+          # Set output variable
+          echo "updated=false" >> $GITHUB_OUTPUT
+          if [ "$latest_image_id" != "$current_image_id" ]; then
+            echo "updated=true" >> $GITHUB_OUTPUT
+            # Generate short and full hash versions for tags
+            full_hash=${latest_image_id:7}
+            short_hash=${latest_image_id:7:8} 
+            echo "full_hash=${full_hash}" >> $GITHUB_OUTPUT
+            echo "short_hash=${short_hash}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Commit and push image_id.txt
+        if: steps.update.outputs.updated == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          git config --local user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add image_id.txt
+          git commit -m "Update image_id.txt"
+
+      - name: Build and push Docker image
+        if: steps.update.outputs.updated == 'true'
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/cloud-sdk-pg:latest
+            ${{ secrets.DOCKER_USERNAME }}/cloud-sdk-pg:${{ steps.update.outputs.full_hash }}
+            ${{ secrets.DOCKER_USERNAME }}/cloud-sdk-pg:${{ steps.update.outputs.short_hash }}
+
+      - name: Push changes
+        if: steps.update.outputs.updated == 'true'
+        uses: ad-m/github-push-action@master
+        with:
+          github_token: ${{ secrets.PAT_TOKEN }}
+          branch: ${{ github.ref }}
